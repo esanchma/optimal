@@ -1,0 +1,7 @@
+{
+  "browserCommand": "xdg-open {url}",
+  "intervalSeconds": 1800,
+  "maxPerCycle": 80,
+  "maxPerFeed": 10,
+  "openOnCheck": false
+}
