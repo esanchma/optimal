@@ -3,5 +3,8 @@
   "intervalSeconds": 1800,
   "maxPerCycle": 80,
   "maxPerFeed": 10,
-  "openOnCheck": false
+  "openOnCheck": false,
+  "cookieFile": "~/.config/cookies.txt",
+  "curlImpersonateCommand": "curl_chrome146",
+  "curlImpersonateTimeoutSeconds": 30
 }

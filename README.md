@@ -48,11 +48,18 @@ By default, the SQLite database lives at `${XDG_DATA_HOME:-~/.local/share}/optim
   "intervalSeconds": 1800,
   "maxPerCycle": 80,
   "maxPerFeed": 10,
-  "openOnCheck": false
+  "openOnCheck": false,
+  "cookieFile": "~/.config/cookies.txt",
+  "curlImpersonateCommand": "curl_chrome146",
+  "curlImpersonateTimeoutSeconds": 30
 }
 ```
 
 You normally do not need to set `dbPath`; if omitted, optimal uses the XDG data path above.
+
+If `cookieFile` points to a Netscape-format cookie jar, optimal sends matching cookies when fetching feeds. Set it to `null` to disable cookie usage.
+
+If a feed returns a non-2xx HTTP status, optimal falls back to `curlImpersonateCommand` with the feed URL as argument. If that command exits with code 0 and writes stdout, optimal parses stdout as the feed body. Set `curlImpersonateCommand` to `null` to disable this fallback.
 
 Examples:
 

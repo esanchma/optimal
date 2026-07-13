@@ -14,6 +14,19 @@ type Config = {
   maxPerCycle: number;
   maxPerFeed: number;
   openOnCheck: boolean;
+  cookieFile: string | null;
+  curlImpersonateCommand: string | null;
+  curlImpersonateTimeoutSeconds: number;
+};
+
+type NetscapeCookie = {
+  domain: string;
+  includeSubdomains: boolean;
+  path: string;
+  secure: boolean;
+  expires: number;
+  name: string;
+  value: string;
 };
 
 type Feed = { id: number; url: string; title: string | null; category: string | null };
@@ -46,6 +59,9 @@ function defaultConfig(): Config {
     maxPerCycle: 80,
     maxPerFeed: 10,
     openOnCheck: false,
+    cookieFile: `${homeDir()}/.config/cookies.txt`,
+    curlImpersonateCommand: "curl_chrome146",
+    curlImpersonateTimeoutSeconds: 30,
   };
 }
 
@@ -150,7 +166,7 @@ function collectOpmlFeeds(node: any, category: string | null = null): Array<{ ur
   return out;
 }
 
-async function importOpml(db: Database, file: string, markCurrentSeen: boolean) {
+async function importOpml(db: Database, config: Config, file: string, markCurrentSeen: boolean) {
   const xml = await Bun.file(file).text();
   const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: "@_" });
   const parsed = parser.parse(xml);
@@ -161,7 +177,7 @@ async function importOpml(db: Database, file: string, markCurrentSeen: boolean) 
   });
   tx();
   console.log(`imported ${feeds.length} feeds`);
-  if (markCurrentSeen) await markCurrentItemsSeen(db, feeds);
+  if (markCurrentSeen) await markCurrentItemsSeen(db, config, feeds);
 }
 
 async function exportOpml(db: Database, file?: string) {
@@ -254,10 +270,86 @@ function parseFeed(xml: string): ParsedItem[] {
   }).filter((i) => i.url);
 }
 
-async function fetchFeed(feed: Pick<Feed, "url">): Promise<ParsedItem[]> {
-  const res = await fetch(feed.url, { headers: { "user-agent": "optimal/0.1 (+https://local)" } });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return parseFeed(await res.text());
+function parseNetscapeCookies(text: string): NetscapeCookie[] {
+  const cookies: NetscapeCookie[] = [];
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || (line.startsWith("#") && !line.startsWith("#HttpOnly_"))) continue;
+    const normalized = line.startsWith("#HttpOnly_") ? line.slice("#HttpOnly_".length) : line;
+    const parts = normalized.split("\t");
+    if (parts.length < 7) continue;
+    const [domain, includeSubdomains, path, secure, expires, name, ...valueParts] = parts;
+    cookies.push({
+      domain,
+      includeSubdomains: includeSubdomains.toUpperCase() === "TRUE",
+      path,
+      secure: secure.toUpperCase() === "TRUE",
+      expires: Number(expires),
+      name,
+      value: valueParts.join("\t"),
+    });
+  }
+  return cookies;
+}
+
+function cookieMatches(cookie: NetscapeCookie, url: URL, nowSeconds: number) {
+  if (cookie.expires && cookie.expires < nowSeconds) return false;
+  if (cookie.secure && url.protocol !== "https:") return false;
+  if (!url.pathname.startsWith(cookie.path)) return false;
+  const host = url.hostname.toLowerCase();
+  const domain = cookie.domain.toLowerCase().replace(/^\./, "");
+  if (cookie.includeSubdomains || cookie.domain.startsWith(".")) return host === domain || host.endsWith(`.${domain}`);
+  return host === domain;
+}
+
+function expandHome(path: string) {
+  return path.replace(/^~(?=\/)/, homeDir());
+}
+
+async function cookieHeaderForUrl(config: Config, urlText: string): Promise<string | null> {
+  if (!config.cookieFile) return null;
+  const cookiePath = resolve(expandHome(config.cookieFile));
+  if (!existsSync(cookiePath)) return null;
+  const url = new URL(urlText);
+  const cookies = parseNetscapeCookies(await Bun.file(cookiePath).text());
+  const now = Math.floor(Date.now() / 1000);
+  const pairs = cookies
+    .filter((cookie) => cookieMatches(cookie, url, now))
+    .map((cookie) => `${cookie.name}=${cookie.value}`);
+  return pairs.length ? pairs.join("; ") : null;
+}
+
+async function fetchWithCurlImpersonate(config: Config, url: string, originalError: string): Promise<string> {
+  if (!config.curlImpersonateCommand) throw new Error(originalError);
+
+  const proc = Bun.spawn([config.curlImpersonateCommand, "--max-time", String(config.curlImpersonateTimeoutSeconds), url], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const timeout = setTimeout(() => proc.kill(), config.curlImpersonateTimeoutSeconds * 1000);
+  try {
+    const [exitCode, stdout, stderr] = await Promise.all([
+      proc.exited,
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+    ]);
+    if (exitCode === 0 && stdout.trim().length > 0) return stdout;
+    const detail = stderr.trim() || `exit ${exitCode}`;
+    throw new Error(`${originalError}; ${config.curlImpersonateCommand} fallback failed: ${detail}`);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function fetchFeed(feed: Pick<Feed, "url">, config: Config): Promise<ParsedItem[]> {
+  const headers: Record<string, string> = { "user-agent": "optimal/0.1 (+https://local)" };
+  const cookie = await cookieHeaderForUrl(config, feed.url);
+  if (cookie) headers.cookie = cookie;
+  const res = await fetch(feed.url, { headers });
+  const xml = res.ok
+    ? await res.text()
+    : await fetchWithCurlImpersonate(config, feed.url, `HTTP ${res.status}`);
+  return parseFeed(xml);
 }
 
 function shellQuote(s: string) {
@@ -276,7 +368,7 @@ async function launchUrl(config: Config, url: string, dryRun: boolean) {
   await proc.exited;
 }
 
-async function markCurrentItemsSeen(db: Database, feeds: ImportFeed[]) {
+async function markCurrentItemsSeen(db: Database, config: Config, feeds: ImportFeed[]) {
   const selectFeed = db.prepare("SELECT id, url, title, category FROM feeds WHERE url = ?");
   const insert = db.prepare("INSERT OR IGNORE INTO items(feed_id, guid, url, title, published_at, launched_at) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)");
   let marked = 0;
@@ -284,7 +376,7 @@ async function markCurrentItemsSeen(db: Database, feeds: ImportFeed[]) {
     const feed = selectFeed.get(imported.url) as Feed | null;
     if (!feed) continue;
     try {
-      const items = await fetchFeed(feed);
+      const items = await fetchFeed(feed, config);
       const tx = db.transaction(() => {
         for (const item of items) {
           const result = insert.run(feed.id, item.guid, item.url, item.title, item.publishedAt);
@@ -312,7 +404,7 @@ async function checkFeeds(db: Database, config: Config, opts: { open: boolean; d
     if (launched >= config.maxPerCycle) break;
     let perFeed = 0;
     try {
-      const items = await fetchFeed(feed);
+      const items = await fetchFeed(feed, config);
       db.prepare("UPDATE feeds SET last_checked_at=CURRENT_TIMESTAMP, last_error=NULL WHERE id=?").run(feed.id);
       for (const item of items) {
         const result = insert.run(feed.id, item.guid, item.url, item.title, item.publishedAt);
@@ -360,7 +452,7 @@ async function main() {
   try {
     if (cmd === "import-opml") {
       if (!flags.positional[0]) usage(1);
-      await importOpml(db, flags.positional[0], flags.markCurrentSeen);
+      await importOpml(db, config, flags.positional[0], flags.markCurrentSeen);
     } else if (cmd === "export-opml") {
       await exportOpml(db, flags.positional[0]);
     } else if (cmd === "add-feed") {
