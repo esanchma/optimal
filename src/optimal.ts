@@ -138,6 +138,15 @@ function openDb(config: Config) {
       launched_at TEXT,
       UNIQUE(feed_id, guid)
     );
+    CREATE TABLE IF NOT EXISTS launched_urls (
+      url TEXT PRIMARY KEY,
+      first_launched_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    INSERT OR IGNORE INTO launched_urls(url, first_launched_at)
+      SELECT url, min(launched_at)
+      FROM items
+      WHERE launched_at IS NOT NULL
+      GROUP BY url;
   `);
   return db;
 }
@@ -371,6 +380,7 @@ async function launchUrl(config: Config, url: string, dryRun: boolean) {
 async function markCurrentItemsSeen(db: Database, config: Config, feeds: ImportFeed[]) {
   const selectFeed = db.prepare("SELECT id, url, title, category FROM feeds WHERE url = ?");
   const insert = db.prepare("INSERT OR IGNORE INTO items(feed_id, guid, url, title, published_at, launched_at) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)");
+  const markUrlLaunched = db.prepare("INSERT OR IGNORE INTO launched_urls(url) VALUES (?)");
   let marked = 0;
   for (const imported of feeds) {
     const feed = selectFeed.get(imported.url) as Feed | null;
@@ -381,6 +391,7 @@ async function markCurrentItemsSeen(db: Database, config: Config, feeds: ImportF
         for (const item of items) {
           const result = insert.run(feed.id, item.guid, item.url, item.title, item.publishedAt);
           marked += result.changes;
+          markUrlLaunched.run(item.url);
         }
       });
       tx();
@@ -400,6 +411,7 @@ async function checkFeeds(db: Database, config: Config, opts: { open: boolean; d
   let discovered = 0;
   const insert = db.prepare("INSERT OR IGNORE INTO items(feed_id, guid, url, title, published_at) VALUES (?, ?, ?, ?, ?)");
   const markLaunched = db.prepare("UPDATE items SET launched_at = CURRENT_TIMESTAMP WHERE feed_id = ? AND guid = ? AND launched_at IS NULL");
+  const markUrlLaunched = db.prepare("INSERT OR IGNORE INTO launched_urls(url) VALUES (?)");
   for (const feed of feeds) {
     if (launched >= config.maxPerCycle) break;
     let perFeed = 0;
@@ -412,8 +424,13 @@ async function checkFeeds(db: Database, config: Config, opts: { open: boolean; d
         discovered++;
         console.log(`new\t${feed.title ?? feed.url}\t${item.title}\t${item.url}`);
         if (opts.open && launched < config.maxPerCycle && perFeed < config.maxPerFeed) {
-          await launchUrl(config, item.url, opts.dryRun);
+          const urlResult = markUrlLaunched.run(item.url);
           markLaunched.run(feed.id, item.guid);
+          if (urlResult.changes === 0) {
+            console.log(`duplicate-url\t${feed.title ?? feed.url}\t${item.title}\t${item.url}`);
+            continue;
+          }
+          await launchUrl(config, item.url, opts.dryRun);
           launched++;
           perFeed++;
         }

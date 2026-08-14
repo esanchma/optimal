@@ -61,6 +61,8 @@ If `cookieFile` points to a Netscape-format cookie jar, optimal sends matching c
 
 If a feed returns a non-2xx HTTP status, optimal falls back to `curlImpersonateCommand` with the feed URL as argument. If that command exits with code 0 and writes stdout, optimal parses stdout as the feed body. Set `curlImpersonateCommand` to `null` to disable this fallback.
 
+optimal stores every feed item, but tab launching is deduplicated globally by URL. If HN, Lobsters, and Reddit publish the same link, only the first occurrence is opened; later occurrences are marked as launched and logged as `duplicate-url`.
+
 Examples:
 
 ```json
