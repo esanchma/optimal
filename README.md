@@ -63,6 +63,8 @@ If a feed returns a non-2xx HTTP status, optimal falls back to `curlImpersonateC
 
 optimal stores every feed item, but tab launching is deduplicated globally by URL. If HN, Lobsters, and Reddit publish the same link, only the first occurrence is opened; later occurrences are marked as launched and logged as `duplicate-url`.
 
+When `add-feed` is called without a title, optimal tries to read the feed title from the feed itself.
+
 Examples:
 
 ```json

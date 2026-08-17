@@ -219,9 +219,38 @@ async function exportOpml(db: Database, file?: string) {
   }
 }
 
-function addFeed(db: Database, url: string, title?: string) {
-  db.prepare("INSERT INTO feeds(url, title) VALUES (?, ?) ON CONFLICT(url) DO UPDATE SET title=coalesce(excluded.title, feeds.title)").run(url, title ?? null);
-  console.log(`added ${url}`);
+async function addFeed(db: Database, config: Config, url: string, title?: string) {
+  let resolvedTitle = title;
+  if (!resolvedTitle) {
+    try {
+      resolvedTitle = (await fetchFeedTitle(url, config)) ?? undefined;
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      console.error(`warning\tcould not fetch title for ${url}\t${msg}`);
+    }
+  }
+  db.prepare("INSERT INTO feeds(url, title) VALUES (?, ?) ON CONFLICT(url) DO UPDATE SET title=coalesce(excluded.title, feeds.title)").run(url, resolvedTitle ?? null);
+  console.log(`added ${resolvedTitle ? `${resolvedTitle} <${url}>` : url}`);
+}
+
+async function addMissingTitles(db: Database, config: Config) {
+  const feeds = db.query("SELECT id, url, title, category FROM feeds WHERE title IS NULL OR trim(title) = '' ORDER BY id").all() as Feed[];
+  const update = db.prepare("UPDATE feeds SET title = ? WHERE id = ?");
+  let titled = 0;
+  for (const feed of feeds) {
+    try {
+      const title = await fetchFeedTitle(feed.url, config);
+      if (!title) continue;
+      update.run(title, feed.id);
+      titled++;
+      console.log(`titled\t${feed.url}\t${title}`);
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      console.error(`error\t${feed.url}\t${msg}`);
+    }
+  }
+  const anonymous = db.query("SELECT count(*) AS count FROM feeds WHERE title IS NULL OR trim(title) = ''").get() as { count: number };
+  console.log(`titled=${titled} anonymous=${anonymous.count}`);
 }
 
 function removeFeed(db: Database, value: string) {
@@ -255,6 +284,12 @@ function pickLink(link: any): string | null {
     if (l?.["@_href"] && (!l["@_rel"] || l["@_rel"] === "alternate")) return String(l["@_href"]);
   }
   return null;
+}
+
+function parseFeedTitle(xml: string): string | null {
+  const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: "@_", removeNSPrefix: true });
+  const doc = parser.parse(xml);
+  return text(doc?.rss?.channel?.title) ?? text(doc?.feed?.title) ?? text(doc?.RDF?.channel?.title);
 }
 
 function parseFeed(xml: string): ParsedItem[] {
@@ -350,15 +385,22 @@ async function fetchWithCurlImpersonate(config: Config, url: string, originalErr
   }
 }
 
-async function fetchFeed(feed: Pick<Feed, "url">, config: Config): Promise<ParsedItem[]> {
+async function fetchFeedXml(feed: Pick<Feed, "url">, config: Config): Promise<string> {
   const headers: Record<string, string> = { "user-agent": "optimal/0.1 (+https://local)" };
   const cookie = await cookieHeaderForUrl(config, feed.url);
   if (cookie) headers.cookie = cookie;
   const res = await fetch(feed.url, { headers });
-  const xml = res.ok
+  return res.ok
     ? await res.text()
     : await fetchWithCurlImpersonate(config, feed.url, `HTTP ${res.status}`);
-  return parseFeed(xml);
+}
+
+async function fetchFeedTitle(url: string, config: Config): Promise<string | null> {
+  return parseFeedTitle(await fetchFeedXml({ url }, config));
+}
+
+async function fetchFeed(feed: Pick<Feed, "url">, config: Config): Promise<ParsedItem[]> {
+  return parseFeed(await fetchFeedXml(feed, config));
 }
 
 function shellQuote(s: string) {
@@ -407,6 +449,7 @@ async function markCurrentItemsSeen(db: Database, config: Config, feeds: ImportF
 
 async function checkFeeds(db: Database, config: Config, opts: { open: boolean; dryRun: boolean }) {
   const feeds = db.query("SELECT id, url, title, category FROM feeds ORDER BY id").all() as Feed[];
+  console.log(`checking ${feeds.length} feeds (open=${opts.open} dryRun=${opts.dryRun})`);
   let launched = 0;
   let discovered = 0;
   const insert = db.prepare("INSERT OR IGNORE INTO items(feed_id, guid, url, title, published_at) VALUES (?, ?, ?, ?, ?)");
@@ -417,6 +460,7 @@ async function checkFeeds(db: Database, config: Config, opts: { open: boolean; d
     let perFeed = 0;
     try {
       const items = await fetchFeed(feed, config);
+      console.log(`fetched ${items.length} items from ${feed.title ?? feed.url}`);
       db.prepare("UPDATE feeds SET last_checked_at=CURRENT_TIMESTAMP, last_error=NULL WHERE id=?").run(feed.id);
       for (const item of items) {
         const result = insert.run(feed.id, item.guid, item.url, item.title, item.publishedAt);
@@ -447,7 +491,9 @@ async function checkFeeds(db: Database, config: Config, opts: { open: boolean; d
 async function daemon(db: Database, config: Config, dryRun: boolean) {
   console.log(`optimal daemon: interval=${config.intervalSeconds}s browser=${config.browserCommand}`);
   while (true) {
+    console.log("checking feeds ");
     await checkFeeds(db, config, { open: true, dryRun });
+    console.log(`sleeping for ${config.intervalSeconds} seconds...`);
     await Bun.sleep(config.intervalSeconds * 1000);
   }
 }
@@ -474,7 +520,9 @@ async function main() {
       await exportOpml(db, flags.positional[0]);
     } else if (cmd === "add-feed") {
       if (!flags.positional[0]) usage(1);
-      addFeed(db, flags.positional[0], flags.positional.slice(1).join(" ") || undefined);
+      await addFeed(db, config, flags.positional[0], flags.positional.slice(1).join(" ") || undefined);
+    } else if (cmd === "add-titles") {
+      await addMissingTitles(db, config);
     } else if (cmd === "remove-feed") {
       if (!flags.positional[0]) usage(1);
       removeFeed(db, flags.positional[0]);
