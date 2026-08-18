@@ -4,6 +4,7 @@
   "maxPerCycle": 80,
   "maxPerFeed": 10,
   "openOnCheck": false,
+  "timeoutSeconds": 120,
   "cookieFile": "~/.config/cookies.txt",
   "curlImpersonateCommand": "curl_chrome146",
   "curlImpersonateTimeoutSeconds": 30

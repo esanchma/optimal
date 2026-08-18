@@ -14,6 +14,7 @@ type Config = {
   maxPerCycle: number;
   maxPerFeed: number;
   openOnCheck: boolean;
+  timeoutSeconds: number;
   cookieFile: string | null;
   curlImpersonateCommand: string | null;
   curlImpersonateTimeoutSeconds: number;
@@ -59,6 +60,7 @@ function defaultConfig(): Config {
     maxPerCycle: 80,
     maxPerFeed: 10,
     openOnCheck: false,
+    timeoutSeconds: 120,
     cookieFile: `${homeDir()}/.config/cookies.txt`,
     curlImpersonateCommand: "curl_chrome146",
     curlImpersonateTimeoutSeconds: 30,
@@ -369,27 +371,23 @@ async function fetchWithCurlImpersonate(config: Config, url: string, originalErr
   const proc = Bun.spawn([config.curlImpersonateCommand, "--max-time", String(config.curlImpersonateTimeoutSeconds), url], {
     stdout: "pipe",
     stderr: "pipe",
+    signal: AbortSignal.timeout(config.timeoutSeconds * 1000),
   });
-  const timeout = setTimeout(() => proc.kill(), config.curlImpersonateTimeoutSeconds * 1000);
-  try {
-    const [exitCode, stdout, stderr] = await Promise.all([
-      proc.exited,
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-    ]);
-    if (exitCode === 0 && stdout.trim().length > 0) return stdout;
-    const detail = stderr.trim() || `exit ${exitCode}`;
-    throw new Error(`${originalError}; ${config.curlImpersonateCommand} fallback failed: ${detail}`);
-  } finally {
-    clearTimeout(timeout);
-  }
+  const [exitCode, stdout, stderr] = await Promise.all([
+    proc.exited,
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ]);
+  if (exitCode === 0 && stdout.trim().length > 0) return stdout;
+  const detail = stderr.trim() || `exit ${exitCode}`;
+  throw new Error(`${originalError}; ${config.curlImpersonateCommand} fallback failed: ${detail}`);
 }
 
 async function fetchFeedXml(feed: Pick<Feed, "url">, config: Config): Promise<string> {
   const headers: Record<string, string> = { "user-agent": "optimal/0.1 (+https://local)" };
   const cookie = await cookieHeaderForUrl(config, feed.url);
   if (cookie) headers.cookie = cookie;
-  const res = await fetch(feed.url, { headers });
+  const res = await fetch(feed.url, { headers, signal: AbortSignal.timeout(config.timeoutSeconds * 1000) });
   return res.ok
     ? await res.text()
     : await fetchWithCurlImpersonate(config, feed.url, `HTTP ${res.status}`);
@@ -415,7 +413,11 @@ async function launchUrl(config: Config, url: string, dryRun: boolean) {
     console.log(`[dry-run] ${command}`);
     return;
   }
-  const proc = Bun.spawn(["sh", "-lc", command], { stdout: "ignore", stderr: "inherit" });
+  const proc = Bun.spawn(["sh", "-lc", command], {
+    stdout: "ignore",
+    stderr: "inherit",
+    signal: AbortSignal.timeout(config.timeoutSeconds * 1000),
+  });
   await proc.exited;
 }
 

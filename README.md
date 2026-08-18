@@ -49,6 +49,7 @@ By default, the SQLite database lives at `${XDG_DATA_HOME:-~/.local/share}/optim
   "maxPerCycle": 80,
   "maxPerFeed": 10,
   "openOnCheck": false,
+  "timeoutSeconds": 120,
   "cookieFile": "~/.config/cookies.txt",
   "curlImpersonateCommand": "curl_chrome146",
   "curlImpersonateTimeoutSeconds": 30
@@ -56,6 +57,8 @@ By default, the SQLite database lives at `${XDG_DATA_HOME:-~/.local/share}/optim
 ```
 
 You normally do not need to set `dbPath`; if omitted, optimal uses the XDG data path above.
+
+`timeoutSeconds` applies to feed fetches and spawned commands, so the daemon does not get stuck forever on a bad feed or browser command.
 
 If `cookieFile` points to a Netscape-format cookie jar, optimal sends matching cookies when fetching feeds. Set it to `null` to disable cookie usage.
 
