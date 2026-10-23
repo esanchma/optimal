@@ -30,7 +30,7 @@ type NetscapeCookie = {
 };
 
 type Feed = { id: number; url: string; title: string | null; category: string | null };
-type ParsedItem = { guid: string; title: string; url: string; publishedAt: string | null };
+type ParsedItem = { guid: string; title: string; url: string; commentsUrl: string | null; publishedAt: string | null };
 type ImportFeed = { url: string; title: string | null; category: string | null };
 
 function homeDir() {
@@ -148,6 +148,16 @@ function openDb(config: Config) {
       WHERE launched_at IS NOT NULL
       GROUP BY url;
   `);
+  try {
+    db.exec("ALTER TABLE items ADD COLUMN launch_failed_at TEXT");
+  } catch (error) {
+    if (!String(error).includes("duplicate column name")) throw error;
+  }
+  try {
+    db.exec("ALTER TABLE items ADD COLUMN launch_error TEXT");
+  } catch (error) {
+    if (!String(error).includes("duplicate column name")) throw error;
+  }
   return db;
 }
 
@@ -286,6 +296,13 @@ function pickLink(link: any): string | null {
   return null;
 }
 
+function pickCommentsLink(link: any): string | null {
+  for (const l of asArray(link)) {
+    if (l?.["@_href"] && (l["@_rel"] === "replies" || l["@_type"] === "text/html" && l["@_title"] === "Comments")) return String(l["@_href"]);
+  }
+  return null;
+}
+
 function parseFeedTitle(xml: string): string | null {
   const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: "@_", removeNSPrefix: true });
   const doc = parser.parse(xml);
@@ -302,7 +319,8 @@ function parseFeed(xml: string): ParsedItem[] {
       const url = pickLink(item.link) ?? text(item.guid) ?? "";
       const title = text(item.title) ?? url;
       const guid = text(item.guid) ?? url ?? `${title}:${text(item.pubDate) ?? ""}`;
-      return { guid, title, url, publishedAt: text(item.pubDate) ?? text(item.date) };
+      const commentsUrl = text(item.comments);
+      return { guid, title, url, commentsUrl: commentsUrl && commentsUrl !== url ? commentsUrl : null, publishedAt: text(item.pubDate) ?? text(item.date) };
     }).filter((i) => i.url);
   }
   const entries = asArray(doc?.feed?.entry);
@@ -310,7 +328,8 @@ function parseFeed(xml: string): ParsedItem[] {
     const url = pickLink(entry.link) ?? text(entry.id) ?? "";
     const title = text(entry.title) ?? url;
     const guid = text(entry.id) ?? url ?? `${title}:${text(entry.updated) ?? ""}`;
-    return { guid, title, url, publishedAt: text(entry.published) ?? text(entry.updated) };
+    const commentsUrl = pickCommentsLink(entry.link);
+    return { guid, title, url, commentsUrl: commentsUrl && commentsUrl !== url ? commentsUrl : null, publishedAt: text(entry.published) ?? text(entry.updated) };
   }).filter((i) => i.url);
 }
 
@@ -366,7 +385,7 @@ async function cookieHeaderForUrl(config: Config, urlText: string): Promise<stri
 async function fetchWithCurlImpersonate(config: Config, url: string, originalError: string): Promise<string> {
   if (!config.curlImpersonateCommand) throw new Error(originalError);
 
-  const proc = Bun.spawn([config.curlImpersonateCommand, "--max-time", String(config.curlImpersonateTimeoutSeconds), url], {
+  const proc = Bun.spawn([config.curlImpersonateCommand, "-s", "--max-time", String(config.curlImpersonateTimeoutSeconds), url], {
     stdout: "pipe",
     stderr: "pipe",
     signal: AbortSignal.timeout(config.timeoutSeconds * 1000),
@@ -403,20 +422,20 @@ function shellQuote(s: string) {
   return `'${s.replaceAll("'", `'\\''`)}'`;
 }
 
-async function launchUrl(config: Config, url: string, dryRun: boolean) {
+async function launchUrl(config: Config, url: string, dryRun: boolean): Promise<number> {
   const command = config.browserCommand.includes("{url}")
     ? config.browserCommand.replaceAll("{url}", shellQuote(url))
     : `${config.browserCommand} ${shellQuote(url)}`;
   if (dryRun) {
     console.log(`[dry-run] ${command}`);
-    return;
+    return 0;
   }
   const proc = Bun.spawn(["sh", "-lc", command], {
     stdout: "ignore",
     stderr: "inherit",
     signal: AbortSignal.timeout(config.timeoutSeconds * 1000),
   });
-  await proc.exited;
+  return await proc.exited;
 }
 
 async function markCurrentItemsSeen(db: Database, config: Config, feeds: ImportFeed[]) {
@@ -434,6 +453,7 @@ async function markCurrentItemsSeen(db: Database, config: Config, feeds: ImportF
           const result = insert.run(feed.id, item.guid, item.url, item.title, item.publishedAt);
           marked += result.changes;
           markUrlLaunched.run(item.url);
+          if (item.commentsUrl) markUrlLaunched.run(item.commentsUrl);
         }
       });
       tx();
@@ -453,7 +473,10 @@ async function checkFeeds(db: Database, config: Config, opts: { open: boolean; d
   let launched = 0;
   let discovered = 0;
   const insert = db.prepare("INSERT OR IGNORE INTO items(feed_id, guid, url, title, published_at) VALUES (?, ?, ?, ?, ?)");
-  const markLaunched = db.prepare("UPDATE items SET launched_at = CURRENT_TIMESTAMP WHERE feed_id = ? AND guid = ? AND launched_at IS NULL");
+  const getItemState = db.prepare("SELECT launched_at, launch_failed_at FROM items WHERE feed_id = ? AND guid = ?");
+  const markLaunched = db.prepare("UPDATE items SET launched_at = CURRENT_TIMESTAMP, launch_failed_at = NULL, launch_error = NULL WHERE feed_id = ? AND guid = ? AND launched_at IS NULL");
+  const markLaunchFailed = db.prepare("UPDATE items SET launch_failed_at = CURRENT_TIMESTAMP, launch_error = ? WHERE feed_id = ? AND guid = ?");
+  const hasLaunchedUrl = db.prepare("SELECT 1 FROM launched_urls WHERE url = ?");
   const markUrlLaunched = db.prepare("INSERT OR IGNORE INTO launched_urls(url) VALUES (?)");
   for (const feed of feeds) {
     if (launched >= config.maxPerCycle) break;
@@ -464,19 +487,54 @@ async function checkFeeds(db: Database, config: Config, opts: { open: boolean; d
       db.prepare("UPDATE feeds SET last_checked_at=CURRENT_TIMESTAMP, last_error=NULL WHERE id=?").run(feed.id);
       for (const item of items) {
         const result = insert.run(feed.id, item.guid, item.url, item.title, item.publishedAt);
-        if (result.changes === 0) continue;
-        discovered++;
-        console.log(`new\t${feed.title ?? feed.url}\t${item.title}\t${item.url}`);
+        if (result.changes !== 0) {
+          discovered++;
+          console.log(`new\t${feed.title ?? feed.url}\t${item.title}\t${item.url}`);
+        } else {
+          const state = getItemState.get(feed.id, item.guid) as { launched_at: string | null; launch_failed_at: string | null } | null;
+          if (state?.launched_at || !state?.launch_failed_at || !opts.open) continue;
+          console.log(`retry-launch\t${feed.title ?? feed.url}\t${item.title}\t${item.url}`);
+        }
         if (opts.open && launched < config.maxPerCycle && perFeed < config.maxPerFeed) {
-          const urlResult = markUrlLaunched.run(item.url);
-          markLaunched.run(feed.id, item.guid);
-          if (urlResult.changes === 0) {
+          if (hasLaunchedUrl.get(item.url)) {
+            if (!opts.dryRun) markLaunched.run(feed.id, item.guid);
             console.log(`duplicate-url\t${feed.title ?? feed.url}\t${item.title}\t${item.url}`);
             continue;
           }
-          await launchUrl(config, item.url, opts.dryRun);
-          launched++;
-          perFeed++;
+          try {
+            const exitCode = await launchUrl(config, item.url, opts.dryRun);
+            if (exitCode !== 0) {
+              markLaunchFailed.run(`exit ${exitCode}`, feed.id, item.guid);
+              console.error(`launch-error\t${exitCode}\t${feed.title ?? feed.url}\t${item.title}\t${item.url}`);
+              continue;
+            }
+            launched++;
+            perFeed++;
+            if (!opts.dryRun) {
+              markUrlLaunched.run(item.url);
+              markLaunched.run(feed.id, item.guid);
+            }
+
+            if (item.commentsUrl && launched < config.maxPerCycle && perFeed < config.maxPerFeed) {
+              if (hasLaunchedUrl.get(item.commentsUrl)) {
+                console.log(`duplicate-comments-url\t${feed.title ?? feed.url}\t${item.title}\t${item.commentsUrl}`);
+              } else {
+                const commentsExitCode = await launchUrl(config, item.commentsUrl, opts.dryRun);
+                if (commentsExitCode === 0) {
+                  launched++;
+                  perFeed++;
+                  if (!opts.dryRun) markUrlLaunched.run(item.commentsUrl);
+                  console.log(`comments\t${feed.title ?? feed.url}\t${item.title}\t${item.commentsUrl}`);
+                } else {
+                  console.error(`comments-launch-error\t${commentsExitCode}\t${feed.title ?? feed.url}\t${item.title}\t${item.commentsUrl}`);
+                }
+              }
+            }
+          } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            markLaunchFailed.run(msg, feed.id, item.guid);
+            console.error(`launch-error\t${msg}\t${feed.title ?? feed.url}\t${item.title}\t${item.url}`);
+          }
         }
       }
     } catch (error) {

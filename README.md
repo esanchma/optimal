@@ -69,6 +69,8 @@ optimal stores every feed item, but tab launching is deduplicated globally by UR
 
 When `add` is called without a title, optimal tries to read the feed title from the feed itself.
 
+For aggregator feeds, if an item has a distinct RSS `<comments>` URL, optimal opens it immediately after the article URL and also records it in the global URL dedupe table.
+
 Examples:
 
 ```json
