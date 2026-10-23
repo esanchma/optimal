@@ -7,9 +7,9 @@ Small OPML/RSS launcher: stores feeds in local SQLite, detects new items, and ca
 ```bash
 bun install
 bun run src/optimal.ts init
-bun run src/optimal.ts import-opml feeds.opml --mark-current-seen
+bun run src/optimal.ts import feeds.opml --mark-current-seen
 bun run src/optimal.ts check --dry-run
-bun run src/optimal.ts check --open
+bun run src/optimal.ts check
 bun run src/optimal.ts daemon
 ```
 
@@ -24,16 +24,18 @@ bun run build
 
 ```text
 optimal init
-optimal import-opml <file.opml> [--mark-current-seen]
-optimal export-opml [file.opml]
-optimal add-feed <url> [title]
-optimal remove-feed <id|url>
-optimal list-feeds
-optimal check [--open] [--dry-run]
-optimal daemon [--dry-run]
+optimal import <file.opml> [--mark-current-seen]
+optimal export [file.opml]
+optimal add <url> [title]
+optimal remove <id|url>
+optimal list
+optimal check [--no-open] [--dry-run]
+optimal daemon [--no-open] [--dry-run]
 ```
 
 `--mark-current-seen` imports feeds and records their current items as already launched, so the first daemon/check cycle only opens genuinely newer items.
+
+`check` and `daemon` open new items by default. Use `--no-open` to only discover and record them.
 
 ## Config
 
@@ -48,7 +50,6 @@ By default, the SQLite database lives at `${XDG_DATA_HOME:-~/.local/share}/optim
   "intervalSeconds": 1800,
   "maxPerCycle": 80,
   "maxPerFeed": 10,
-  "openOnCheck": false,
   "timeoutSeconds": 120,
   "cookieFile": "~/.config/cookies.txt",
   "curlImpersonateCommand": "curl_chrome146",
@@ -66,7 +67,7 @@ If a feed returns a non-2xx HTTP status, optimal falls back to `curlImpersonateC
 
 optimal stores every feed item, but tab launching is deduplicated globally by URL. If HN, Lobsters, and Reddit publish the same link, only the first occurrence is opened; later occurrences are marked as launched and logged as `duplicate-url`.
 
-When `add-feed` is called without a title, optimal tries to read the feed title from the feed itself.
+When `add` is called without a title, optimal tries to read the feed title from the feed itself.
 
 Examples:
 
@@ -81,7 +82,7 @@ Examples:
 Environment overrides:
 
 ```bash
-OPTIMAL_CONFIG=/path/to/config.json optimal list-feeds
+OPTIMAL_CONFIG=/path/to/config.json optimal list
 OPTIMAL_DATA_DIR=/path/to/data optimal init
 OPTIMAL_DB=/path/to/optimal.sqlite optimal check
 ```

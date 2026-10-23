@@ -13,7 +13,6 @@ type Config = {
   intervalSeconds: number;
   maxPerCycle: number;
   maxPerFeed: number;
-  openOnCheck: boolean;
   timeoutSeconds: number;
   cookieFile: string | null;
   curlImpersonateCommand: string | null;
@@ -59,7 +58,6 @@ function defaultConfig(): Config {
     intervalSeconds: 30 * 60,
     maxPerCycle: 80,
     maxPerFeed: 10,
-    openOnCheck: false,
     timeoutSeconds: 120,
     cookieFile: `${homeDir()}/.config/cookies.txt`,
     curlImpersonateCommand: "curl_chrome146",
@@ -72,13 +70,13 @@ function usage(exitCode = 0): never {
 
 Usage:
   optimal init
-  optimal import-opml <file.opml> [--mark-current-seen]
-  optimal export-opml [file.opml]
-  optimal add-feed <url> [title]
-  optimal remove-feed <id|url>
-  optimal list-feeds
-  optimal check [--open] [--dry-run]
-  optimal daemon [--dry-run]
+  optimal import <file.opml> [--mark-current-seen]
+  optimal export [file.opml]
+  optimal add <url> [title]
+  optimal remove <id|url>
+  optimal list
+  optimal check [--no-open] [--dry-run]
+  optimal daemon [--no-open] [--dry-run]
 
 Config: ${configPath()}
 Database: ${defaultConfig().dbPath}
@@ -88,7 +86,7 @@ Build:  bun run build`);
 
 function parseFlags(args: string[]) {
   return {
-    open: args.includes("--open"),
+    noOpen: args.includes("--no-open"),
     dryRun: args.includes("--dry-run"),
     markCurrentSeen: args.includes("--mark-current-seen"),
     positional: args.filter((a) => !a.startsWith("--")),
@@ -490,11 +488,11 @@ async function checkFeeds(db: Database, config: Config, opts: { open: boolean; d
   console.log(`discovered=${discovered} launched=${launched}`);
 }
 
-async function daemon(db: Database, config: Config, dryRun: boolean) {
+async function daemon(db: Database, config: Config, noOpen: boolean, dryRun: boolean) {
   console.log(`optimal daemon: interval=${config.intervalSeconds}s browser=${config.browserCommand}`);
   while (true) {
     console.log("checking feeds ");
-    await checkFeeds(db, config, { open: true, dryRun });
+    await checkFeeds(db, config, { open: !noOpen, dryRun });
     console.log(`sleeping for ${config.intervalSeconds} seconds...`);
     await Bun.sleep(config.intervalSeconds * 1000);
   }
@@ -515,25 +513,25 @@ async function main() {
 
   const db = openDb(config);
   try {
-    if (cmd === "import-opml") {
+    if (cmd === "import") {
       if (!flags.positional[0]) usage(1);
       await importOpml(db, config, flags.positional[0], flags.markCurrentSeen);
-    } else if (cmd === "export-opml") {
+    } else if (cmd === "export") {
       await exportOpml(db, flags.positional[0]);
-    } else if (cmd === "add-feed") {
+    } else if (cmd === "add") {
       if (!flags.positional[0]) usage(1);
       await addFeed(db, config, flags.positional[0], flags.positional.slice(1).join(" ") || undefined);
     } else if (cmd === "add-titles") {
       await addMissingTitles(db, config);
-    } else if (cmd === "remove-feed") {
+    } else if (cmd === "remove") {
       if (!flags.positional[0]) usage(1);
       removeFeed(db, flags.positional[0]);
-    } else if (cmd === "list-feeds") {
+    } else if (cmd === "list") {
       listFeeds(db);
     } else if (cmd === "check") {
-      await checkFeeds(db, config, { open: flags.open || config.openOnCheck, dryRun: flags.dryRun });
+      await checkFeeds(db, config, { open: !flags.noOpen, dryRun: flags.dryRun });
     } else if (cmd === "daemon") {
-      await daemon(db, config, flags.dryRun);
+      await daemon(db, config, flags.noOpen, flags.dryRun);
     } else {
       usage(1);
     }
